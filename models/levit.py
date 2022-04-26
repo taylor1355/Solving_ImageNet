@@ -229,7 +229,7 @@ class Attention(nn.Module):
     ab: Dict[str, torch.Tensor]
 
     def __init__(
-            self, dim, key_dim, num_heads=8, attn_ratio=4, act_layer=None, resolution=14, use_conv=False):
+            self, dim, key_dim, num_heads=8, attn_ratio=4, act_layer=None, resolution=14, use_conv=False, attention_type='normal'):
         super().__init__()
 
         self.num_heads = num_heads
@@ -261,6 +261,25 @@ class Attention(nn.Module):
         self.register_buffer('attention_bias_idxs', torch.LongTensor(idxs).view(N, N))
         self.ab = {}
 
+        self.head_dim = dim // self.num_heads
+        self.attention_type = attention_type
+
+        if 'reverse' in self.attention_type:
+            self.activation = nn.GELU()
+            self.input_proj = nn.Linear(dim, dim)
+            self.weight_generator = nn.Linear(self.head_dim, self.head_dim * self.head_dim, bias=False)
+            self.reverse_parameters = [self.qkv, self.input_proj, self.weight_generator]
+            if self.attention_type == 'reverse':
+                self.bias_generator = nn.Linear(self.head_dim, self.head_dim, bias=False)
+                self.reverse_parameters.append(self.bias_generator)
+            elif self.attention_type == 'shared_forward_and_reverse':
+                self.expert_proj = nn.Linear(dim, dim)
+                self.reverse_parameters.append(self.expert_proj)
+
+        self.attn_parameters = [self.qkv]
+        self.forward_parameters = [self.qkv]
+        self.layer_parameters = [self.proj]
+
     @torch.no_grad()
     def train(self, mode=True):
         super().train(mode)
@@ -275,6 +294,29 @@ class Attention(nn.Module):
             if device_key not in self.ab:
                 self.ab[device_key] = self.attention_biases[:, self.attention_bias_idxs]
             return self.ab[device_key]
+
+    def forward_normal(self, x, attn, v):
+        B, N, C = x.shape
+        return (attn @ v).transpose(1, 2).reshape(B, N, self.dh)
+        #return (attn @ v).transpose(1, 2).reshape(B, N, C)
+
+    def forward_reverse(self, x, attn, v):
+        B, N, C = x.shape
+        x_proj = self.activation(self.input_proj(x).reshape(B, N, self.num_heads, self.head_dim, 1).transpose(2, 1))
+        if self.attention_type == 'reverse':
+            attn_operand = v
+        else:
+            attn_operand = self.expert_proj(x).reshape(B, N, self.num_heads, self.head_dim).transpose(2, 1)
+
+        experts = (attn.transpose(-2, -1) @ self.activation(attn_operand))
+
+        weights = self.weight_generator(experts).reshape(B, self.num_heads, N, self.head_dim, self.head_dim)
+        output = (weights @ x_proj).squeeze(-1)
+        if self.attention_type == 'reverse':
+            biases = self.bias_generator(experts)
+            output = output + biases
+        output = output.transpose(2, 1).flatten(2)
+        return output
 
     def forward(self, x):  # x (B,C,H,W)
         if self.use_conv:
@@ -296,7 +338,16 @@ class Attention(nn.Module):
             attn = q @ k.transpose(-2, -1) * self.scale + self.get_attention_biases(x.device)
             attn = attn.softmax(dim=-1)
 
-            x = (attn @ v).transpose(1, 2).reshape(B, N, self.dh)
+            #x = (attn @ v).transpose(1, 2).reshape(B, N, self.dh)
+            if self.attention_type == 'normal':
+                x = self.forward_normal(x, attn, v)
+            elif self.attention_type == 'reverse':
+                x = self.forward_reverse(x, attn, v)
+            elif self.attention_type == 'shared_forward_and_reverse':
+                normal_output = self.forward_normal(x, attn, v)
+                reverse_output = self.forward_reverse(x, attn, v)
+                x = normal_output + reverse_output
+
         x = self.proj(x)
         return x
 
@@ -421,7 +472,9 @@ class Levit(nn.Module):
             distillation=False,
             use_conv=False,
             drop_rate=0.,
-            drop_path_rate=0.):
+            drop_path_rate=0.,
+            attention_type='normal',
+            injection_blocks=-1):
         super().__init__()
         act_layer = get_act_layer(act_layer)
         attn_act_layer = get_act_layer(attn_act_layer)
@@ -454,12 +507,14 @@ class Levit(nn.Module):
         resolution = img_size // patch_size
         for i, (ed, kd, dpth, nh, ar, mr, do) in enumerate(
                 zip(embed_dim, key_dim, depth, num_heads, attn_ratio, mlp_ratio, down_ops)):
-            for _ in range(dpth):
+            for j in range(dpth):
                 self.blocks.append(
                     Residual(
                         Attention(
                             ed, kd, nh, attn_ratio=ar, act_layer=attn_act_layer,
-                            resolution=resolution, use_conv=use_conv),
+                            resolution=resolution, use_conv=use_conv,
+                            attention_type=attention_type if (j == 0 and injection_blocks != -1 and i in injection_blocks) else 'normal'
+                        ),
                         drop_path_rate))
                 if mr > 0:
                     h = int(ed * mr)

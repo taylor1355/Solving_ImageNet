@@ -303,6 +303,26 @@ parser.add_argument('--torchscript', dest='torchscript', action='store_true',
                     help='convert model torchscript for inference')
 parser.add_argument('--log-wandb', action='store_true', default=False,
                     help='log training and validation metrics to wandb')
+
+# Continual Learning Parameters
+parser.add_argument('--attention_type', default='normal')
+parser.add_argument('--injection_blocks', nargs='+', type=int, default=-1)
+parser.add_argument('--continue_learning', action='store_true', default=False)
+parser.add_argument('--freeze_baseline_parameters', action='store_true', default=False)
+parser.add_argument('--train_parameters', default='block')
+parser.add_argument('--stop_epoch', default=150)
+parser.add_argument('--stop_diff', default=.1)
+parser.add_argument('--not_strict', action='store_true', default=False)
+
+def set_requires_grad(m, requires_grad):
+    # from https://discuss.pytorch.org/t/requires-grad-doesnt-propagate-to-the-parameters-of-the-module/9979/6
+    if hasattr(m, 'weight') and m.weight is not None:
+        m.weight.requires_grad_(requires_grad)
+    if hasattr(m, 'bias') and m.bias is not None:
+        m.bias.requires_grad_(requires_grad)
+    else:
+        m.requires_grad_(requires_grad)
+
 ### KD ###
 parser.add_argument('--kd_model_path', default=None, type=str)
 parser.add_argument('--kd_model_name', default=None, type=str)
@@ -374,6 +394,8 @@ def main():
 
     random_seed(args.seed, args.rank)
 
+    _logger.info('Print strict: {}'.format(args.not_strict))
+
     model_KD = None
     if args.kd_model_name is not None:
         model_KD = build_kd_model(args)
@@ -390,7 +412,31 @@ def main():
         bn_momentum=args.bn_momentum,
         bn_eps=args.bn_eps,
         scriptable=args.torchscript,
-        checkpoint_path=args.initial_checkpoint)
+        checkpoint_path=args.initial_checkpoint,
+        attention_type=args.attention_type,
+        injection_blocks=args.injection_blocks,
+        strict=not args.not_strict)
+
+    print(model)
+    if args.continue_learning and args.freeze_baseline_parameters:
+        for param in model.parameters(): param.requires_grad = False
+        trainable_parameters = []
+        for injection_block in args.injection_blocks:
+            block = model.blocks[injection_block]
+            if 'reverse' in args.attention_type:
+                trainable_parameters += block.attn.reverse_parameters + block.attn.layer_parameters
+            if args.attention_type == 'shared_forward_and_reverse':
+                trainable_parameters += block.attn.forward_parameters
+            if args.train_parameters == 'block':
+                trainable_parameters += block.block_parameters
+        
+        for param in trainable_parameters:
+            set_requires_grad(param, True)
+        
+    _logger.info('Trainable Paramaters: {}'.format(
+        [name for name, param in model.named_parameters() if param.requires_grad])
+    )
+
     if args.num_classes is None:
         assert hasattr(model, 'num_classes'), 'Model must have `num_classes` attr if not set on cmd line/config.'
         args.num_classes = model.num_classes  # FIXME handle model default vs config num_classes more elegantly
@@ -669,6 +715,9 @@ def main():
                 else:
                     save_metric_ema=-1
                 best_metric, best_epoch = saver.save_checkpoint(epoch, metric=save_metric,metric_ema=save_metric_ema)
+
+            if args.continue_learning:
+                if args.stop_epoch <= epoch: break
 
     except KeyboardInterrupt:
         pass
