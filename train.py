@@ -18,10 +18,13 @@ import argparse
 import time
 import yaml
 import os
+import re
 import logging
+import math
 from collections import OrderedDict
 from contextlib import suppress
 from datetime import datetime
+import numpy as np
 
 import torch
 import torch.nn as nn
@@ -39,6 +42,7 @@ from timm.utils import ApexScaler, NativeScaler
 from models import create_model, safe_model_name, resume_checkpoint, load_checkpoint, \
     convert_splitbn_model, model_parameters
 from utils.checkpoint_saver import CheckpointSaverUSI
+from utils.utils import get_grad_norm
 from kd.kd_utils import build_kd_model
 
 try:
@@ -307,6 +311,7 @@ parser.add_argument('--log-wandb', action='store_true', default=False,
 # Continual Learning Parameters
 parser.add_argument('--attention_type', default='normal')
 parser.add_argument('--injection_blocks', nargs='+', type=int, default=-1)
+parser.add_argument('--non_transposed_softmax', action='store_true', default=False)
 parser.add_argument('--continue_learning', action='store_true', default=False)
 parser.add_argument('--freeze_baseline_parameters', action='store_true', default=False)
 parser.add_argument('--train_parameters', default='block')
@@ -346,36 +351,7 @@ def _parse_args():
     return args, args_text
 
 
-def main():
-    setup_default_logging()
-    args, args_text = _parse_args()
-
-    if args.log_wandb:
-        if has_wandb:
-            wandb.init(project=args.experiment, config=args)
-        else:
-            _logger.warning("You've requested to log metrics to wandb but package not found. "
-                            "Metrics not being logged to wandb, try `pip install wandb`")
-
-    args.prefetcher = not args.no_prefetcher
-    args.distributed = False
-    if 'WORLD_SIZE' in os.environ:
-        args.distributed = int(os.environ['WORLD_SIZE']) > 1
-    args.device = 'cuda:0'
-    args.world_size = 1
-    args.rank = 0  # global rank
-    if args.distributed:
-        args.device = 'cuda:%d' % args.local_rank
-        torch.cuda.set_device(args.local_rank)
-        torch.distributed.init_process_group(backend='nccl', init_method='env://')
-        args.world_size = torch.distributed.get_world_size()
-        args.rank = torch.distributed.get_rank()
-        _logger.info('Training in distributed mode with multiple processes, 1 GPU per process. Process %d, total %d.'
-                     % (args.rank, args.world_size))
-    else:
-        _logger.info('Training with a single process on 1 GPUs.')
-    assert args.rank >= 0
-
+def main(args, args_text):
     # resolve AMP arguments based on PyTorch / Apex availability
     use_amp = None
     if args.amp:
@@ -393,6 +369,12 @@ def main():
                         "Install NVIDA apex or upgrade to PyTorch 1.6")
 
     random_seed(args.seed, args.rank)
+
+    seed = args.seed + args.rank
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
 
     _logger.info('Print strict: {}'.format(args.not_strict))
 
@@ -415,9 +397,10 @@ def main():
         checkpoint_path=args.initial_checkpoint,
         attention_type=args.attention_type,
         injection_blocks=args.injection_blocks,
+        args=args,
         strict=not args.not_strict)
 
-    print(model)
+    #print(model)
     if args.continue_learning and args.freeze_baseline_parameters:
         for param in model.parameters(): param.requires_grad = False
         trainable_parameters = []
@@ -670,6 +653,7 @@ def main():
             f.write(args_text)
 
     try:
+        epoch_losses = []
         for epoch in range(start_epoch, num_epochs):
             if args.distributed and hasattr(loader_train.sampler, 'set_epoch'):
                 loader_train.sampler.set_epoch(epoch)
@@ -679,6 +663,25 @@ def main():
                 lr_scheduler=lr_scheduler, saver=saver, output_dir=output_dir,
                 amp_autocast=amp_autocast, loss_scaler=loss_scaler, model_ema=model_ema, mixup_fn=mixup_fn,
                 model_KD=model_KD)
+
+            epoch_losses.append(train_metrics['loss'])
+            loss_spiked = len(epoch_losses) >= 3 and epoch_losses[-1] >= 1.4 * epoch_losses[-3]
+            #loss_spiked=epoch >= 2 #TODO: remove
+            if math.isnan(epoch_losses[-1]) or loss_spiked:
+                if saver is not None and len(epoch_losses) >= 3:
+                    most_recent_epoch = -1
+                    most_recent_path = None
+                    for checkpoint in saver.checkpoint_files:
+                        path, _ = checkpoint
+                        checkpoint_epoch = int(re.findall(r'\d+', path)[-1])
+                        if checkpoint_epoch <= epoch - 2 and checkpoint_epoch > most_recent_epoch:
+                            most_recent_epoch = checkpoint_epoch
+                            most_recent_path = path
+                    args.resume = most_recent_path
+                    print(f"Restarting from checkpoint '{most_recent_epoch}'")
+                    
+                print(f"Restarting training")
+                return False
 
             if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
                 if args.local_rank == 0:
@@ -724,6 +727,8 @@ def main():
     if best_metric is not None:
         _logger.info('*** Best metric: {0} (epoch {1})'.format(best_metric, best_epoch))
 
+    return True # done training
+
 
 def train_one_epoch(
         epoch, model, loader, optimizer, loss_fn, args,
@@ -739,6 +744,7 @@ def train_one_epoch(
     batch_time_m = AverageMeter()
     data_time_m = AverageMeter()
     losses_m = AverageMeter()
+    grad_norms_m = AverageMeter()
 
     model.train()
 
@@ -794,6 +800,9 @@ def train_one_epoch(
                     value=args.clip_grad, mode=args.clip_mode)
             optimizer.step()
 
+        grad_norm = get_grad_norm(model.parameters()) # TODO: maybe replace with model_parameters(model, exclude_head='agc' in args.clip_mode)
+        grad_norms_m.update(grad_norm)
+
         if model_ema is not None:
             model_ema.update(model)
 
@@ -812,6 +821,7 @@ def train_one_epoch(
                 _logger.info(
                     'Train: {} [{:>4d}/{} ({:>3.0f}%)]  '
                     'Loss: {loss.val:#.4g} ({loss.avg:#.3g})  '
+                    'Grad Norm: {grad_norm.val:#.4g} ({grad_norm.avg:#.3g})  '
                     'Time: {batch_time.val:.3f}s, {rate:>7.2f}/s  '
                     '({batch_time.avg:.3f}s, {rate_avg:>7.2f}/s)  '
                     'LR: {lr:.3e}  '
@@ -820,6 +830,7 @@ def train_one_epoch(
                         batch_idx, len(loader),
                         100. * batch_idx / last_idx,
                         loss=losses_m,
+                        grad_norm=grad_norms_m,
                         batch_time=batch_time_m,
                         rate=input.size(0) * args.world_size / batch_time_m.val,
                         rate_avg=input.size(0) * args.world_size / batch_time_m.avg,
@@ -914,4 +925,35 @@ def validate(model, loader, loss_fn, args, amp_autocast=suppress, log_suffix='')
 
 
 if __name__ == '__main__':
-    main()
+    setup_default_logging()
+    args, args_text = _parse_args()
+
+    if args.log_wandb:
+        if has_wandb:
+            wandb.init(project=args.experiment, config=args)
+        else:
+            _logger.warning("You've requested to log metrics to wandb but package not found. "
+                            "Metrics not being logged to wandb, try `pip install wandb`")
+
+    args.prefetcher = not args.no_prefetcher
+    args.distributed = False
+    if 'WORLD_SIZE' in os.environ:
+        args.distributed = int(os.environ['WORLD_SIZE']) > 1
+    args.device = 'cuda:0'
+    args.world_size = 1
+    args.rank = 0  # global rank
+    if args.distributed:
+        args.device = 'cuda:%d' % args.local_rank
+        torch.cuda.set_device(args.local_rank)
+        torch.distributed.init_process_group(backend='nccl', init_method='env://')
+        args.world_size = torch.distributed.get_world_size()
+        args.rank = torch.distributed.get_rank()
+        _logger.info('Training in distributed mode with multiple processes, 1 GPU per process. Process %d, total %d.'
+                     % (args.rank, args.world_size))
+    else:
+        _logger.info('Training with a single process on 1 GPUs.')
+    assert args.rank >= 0
+
+    done_training = False
+    while not done_training:
+        done_training = main(args, args_text)

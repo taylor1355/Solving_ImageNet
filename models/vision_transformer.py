@@ -179,7 +179,7 @@ default_cfgs = {
 
 
 class Attention(nn.Module):
-    def __init__(self, dim, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0., attention_type='normal'):
+    def __init__(self, dim, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0., attention_type='normal', args=None):
         super().__init__()
         assert dim % num_heads == 0, 'dim should be divisible by num_heads'
         self.num_heads = num_heads
@@ -188,6 +188,7 @@ class Attention(nn.Module):
         self.head_dim = head_dim
 
         self.attention_type = attention_type
+        self.args = args
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
@@ -222,7 +223,10 @@ class Attention(nn.Module):
         else:
             attn_operand = self.expert_proj(x).reshape(B, N, self.num_heads, self.head_dim).transpose(2, 1)
         
-        experts = (attn.transpose(-2, -1) @ self.activation(attn_operand))
+        if self.args.non_transposed_softmax:
+            experts = (attn @ self.activation(attn_operand))
+        else:
+            experts = (attn.transpose(-2, -1) @ self.activation(attn_operand))
         
         weights = self.weight_generator(experts).reshape(B, self.num_heads, N, self.head_dim, self.head_dim)
         output = (weights @ x_proj).squeeze(-1)
@@ -269,13 +273,14 @@ class Block(nn.Module):
 
     def __init__(
             self, dim, num_heads, mlp_ratio=4., qkv_bias=False, drop=0., attn_drop=0., init_values=None,
-            drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, attention_type='normal'):
+            drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, attention_type='normal', args=None):
         super().__init__()
         self.norm1 = norm_layer(dim)
         self.attn = Attention(
             dim, num_heads=num_heads, qkv_bias=qkv_bias, 
             attn_drop=attn_drop, proj_drop=drop, 
-            attention_type=attention_type
+            attention_type=attention_type,
+            args=args
         )
         self.ls1 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
@@ -348,7 +353,7 @@ class VisionTransformer(nn.Module):
             embed_dim=768, depth=12, num_heads=12, mlp_ratio=4., qkv_bias=True, representation_size=None,
             drop_rate=0., attn_drop_rate=0., drop_path_rate=0., weight_init='', init_values=None,
             embed_layer=PatchEmbed, norm_layer=None, act_layer=None, block_fn=Block, attention_type='normal',
-            injection_blocks=-1):
+            injection_blocks=-1, args=None):
         """
         Args:
             img_size (int, tuple): input image size
@@ -395,7 +400,7 @@ class VisionTransformer(nn.Module):
             block_fn(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, init_values=init_values,
                 drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, act_layer=act_layer,
-                attention_type=attention_type if (injection_blocks != -1 and i in injection_blocks) else 'normal'
+                attention_type=attention_type if (injection_blocks != -1 and i in injection_blocks) else 'normal', args=args
                 )
             for i in range(depth)])
         use_fc_norm = self.global_pool == 'avg'

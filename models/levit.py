@@ -229,7 +229,7 @@ class Attention(nn.Module):
     ab: Dict[str, torch.Tensor]
 
     def __init__(
-            self, dim, key_dim, num_heads=8, attn_ratio=4, act_layer=None, resolution=14, use_conv=False, attention_type='normal'):
+            self, dim, key_dim, num_heads=8, attn_ratio=4, act_layer=None, resolution=14, use_conv=False, attention_type='normal', args=None):
         super().__init__()
 
         self.num_heads = num_heads
@@ -263,6 +263,7 @@ class Attention(nn.Module):
 
         self.head_dim = dim // self.num_heads
         self.attention_type = attention_type
+        self.args = args
 
         if 'reverse' in self.attention_type:
             self.activation = nn.GELU()
@@ -308,7 +309,10 @@ class Attention(nn.Module):
         else:
             attn_operand = self.expert_proj(x).reshape(B, N, self.num_heads, self.head_dim).transpose(2, 1)
 
-        experts = (attn.transpose(-2, -1) @ self.activation(attn_operand))
+        if self.args.non_transposed_softmax:
+            experts = (attn @ self.activation(attn_operand))
+        else:
+            experts = (attn.transpose(-2, -1) @ self.activation(attn_operand))
 
         weights = self.weight_generator(experts).reshape(B, self.num_heads, N, self.head_dim, self.head_dim)
         output = (weights @ x_proj).squeeze(-1)
@@ -474,7 +478,8 @@ class Levit(nn.Module):
             drop_rate=0.,
             drop_path_rate=0.,
             attention_type='normal',
-            injection_blocks=-1):
+            injection_blocks=-1,
+            args=None):
         super().__init__()
         act_layer = get_act_layer(act_layer)
         attn_act_layer = get_act_layer(attn_act_layer)
@@ -513,7 +518,7 @@ class Levit(nn.Module):
                         Attention(
                             ed, kd, nh, attn_ratio=ar, act_layer=attn_act_layer,
                             resolution=resolution, use_conv=use_conv,
-                            attention_type=attention_type if (j == 0 and injection_blocks != -1 and i in injection_blocks) else 'normal'
+                            attention_type=attention_type if (j == 0 and injection_blocks != -1 and i in injection_blocks) else 'normal', args=args
                         ),
                         drop_path_rate))
                 if mr > 0:
