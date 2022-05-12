@@ -35,6 +35,7 @@ from timm.data import IMAGENET_DEFAULT_STD, IMAGENET_DEFAULT_MEAN
 from .helpers import build_model_with_cfg
 from .layers import to_ntuple, get_act_layer
 from .vision_transformer import trunc_normal_
+from .bisa import BidirectionalAttention
 from .registry import register_model
 
 
@@ -477,8 +478,6 @@ class Levit(nn.Module):
             use_conv=False,
             drop_rate=0.,
             drop_path_rate=0.,
-            attention_type='normal',
-            injection_blocks=-1,
             args=None):
         super().__init__()
         act_layer = get_act_layer(act_layer)
@@ -513,14 +512,23 @@ class Levit(nn.Module):
         for i, (ed, kd, dpth, nh, ar, mr, do) in enumerate(
                 zip(embed_dim, key_dim, depth, num_heads, attn_ratio, mlp_ratio, down_ops)):
             for j in range(dpth):
-                self.blocks.append(
-                    Residual(
-                        Attention(
-                            ed, kd, nh, attn_ratio=ar, act_layer=attn_act_layer,
-                            resolution=resolution, use_conv=use_conv,
-                            attention_type=attention_type if (j == 0 and injection_blocks != -1 and i in injection_blocks) else 'normal', args=args
-                        ),
-                        drop_path_rate))
+                is_bidirectional = j == 0 and args.injection_blocks != -1 and i in args.injection_blocks and args.is_bidirectional
+                if is_bidirectional:
+                    self.blocks.append(
+                        Residual(
+                            BidirectionalAttention(
+                                ed, nh, args=args
+                            ),
+                            drop_path_rate))
+                else:
+                    self.blocks.append(
+                        Residual(
+                            Attention(
+                                ed, kd, nh, attn_ratio=ar, act_layer=attn_act_layer,
+                                resolution=resolution, use_conv=use_conv,
+                                attention_type='normal', args=args
+                            ),
+                            drop_path_rate))
                 if mr > 0:
                     h = int(ed * mr)
                     self.blocks.append(

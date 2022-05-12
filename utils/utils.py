@@ -11,3 +11,9 @@ def get_grad_norm(parameters, norm_type=2):
         total_norm += param_norm.item() ** norm_type
     total_norm = total_norm ** (1. / norm_type)
     return total_norm
+
+def find_param_containing_substring(model, substring):
+    for name, param in model.named_parameters():
+        if substring in name:
+            return param
+    raise ValueError(f'Could not find param with name containing "{substring}"')

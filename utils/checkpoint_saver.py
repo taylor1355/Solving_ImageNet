@@ -9,6 +9,8 @@ import glob
 import operator
 import os
 import logging
+import shutil
+from pathlib import Path
 
 import torch
 
@@ -74,6 +76,8 @@ class CheckpointSaverUSI:  # don't save optimizer state dict, since it forces sp
                 self._cleanup_checkpoints(1)
             filename = '-'.join([self.save_prefix, str(epoch)]) + self.extension
             save_path = os.path.join(self.checkpoint_dir, filename)
+            if os.path.exists(save_path):
+                os.remove(save_path)
             os.link(last_save_path, save_path)
             self.checkpoint_files.append((save_path, metric))
             self.checkpoint_files = sorted(
@@ -125,7 +129,13 @@ class CheckpointSaverUSI:  # don't save optimizer state dict, since it forces sp
         for d in to_delete:
             try:
                 _logger.debug("Cleaning checkpoint: {}".format(d))
-                os.remove(d[0])
+
+                old_checkpoint_dir = os.path.join(self.checkpoint_dir, 'old')
+                Path(old_checkpoint_dir).mkdir(parents=True, exist_ok=True)
+
+                checkpoint_name = os.pathbasename(d[0])
+                shutil.move(d[0], os.path.join(old_checkpoint_dir, checkpoint_name))
+                
             except Exception as e:
                 _logger.error("Exception '{}' while deleting checkpoint".format(e))
         self.checkpoint_files = self.checkpoint_files[:delete_index]

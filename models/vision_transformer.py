@@ -33,6 +33,7 @@ from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD, IMAGENET_INCE
 from .helpers import build_model_with_cfg, resolve_pretrained_cfg, named_apply, adapt_input_conv, checkpoint_seq
 from .layers import PatchEmbed, Mlp, DropPath, trunc_normal_, lecun_normal_
 from .registry import register_model
+from .bisa import BidirectionalAttention
 
 _logger = logging.getLogger(__name__)
 
@@ -273,15 +274,22 @@ class Block(nn.Module):
 
     def __init__(
             self, dim, num_heads, mlp_ratio=4., qkv_bias=False, drop=0., attn_drop=0., init_values=None,
-            drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, attention_type='normal', args=None):
+            drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, is_bidirectional=False, args=None):
         super().__init__()
         self.norm1 = norm_layer(dim)
-        self.attn = Attention(
-            dim, num_heads=num_heads, qkv_bias=qkv_bias, 
-            attn_drop=attn_drop, proj_drop=drop, 
-            attention_type=attention_type,
-            args=args
-        )
+        if is_bidirectional:
+            self.attn = BidirectionalAttention(
+                dim, num_heads, qkv_bias=qkv_bias,
+                attn_drop=attn_drop, proj_drop=drop,
+                args=args
+            )
+        else:
+            self.attn = Attention(
+                dim, num_heads=num_heads, qkv_bias=qkv_bias, 
+                attn_drop=attn_drop, proj_drop=drop, 
+                attention_type='normal',
+                args=args
+            )
         self.ls1 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
         self.drop_path1 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
@@ -352,8 +360,7 @@ class VisionTransformer(nn.Module):
             self, img_size=224, patch_size=16, in_chans=3, num_classes=1000, global_pool='token',
             embed_dim=768, depth=12, num_heads=12, mlp_ratio=4., qkv_bias=True, representation_size=None,
             drop_rate=0., attn_drop_rate=0., drop_path_rate=0., weight_init='', init_values=None,
-            embed_layer=PatchEmbed, norm_layer=None, act_layer=None, block_fn=Block, attention_type='normal',
-            injection_blocks=-1, args=None):
+            embed_layer=PatchEmbed, norm_layer=None, act_layer=None, block_fn=Block, args=None):
         """
         Args:
             img_size (int, tuple): input image size
@@ -400,8 +407,8 @@ class VisionTransformer(nn.Module):
             block_fn(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, init_values=init_values,
                 drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, act_layer=act_layer,
-                attention_type=attention_type if (injection_blocks != -1 and i in injection_blocks) else 'normal', args=args
-                )
+                is_bidirectional=args.injection_blocks != -1 and i in args.injection_blocks and args.is_bidirectional, args=args
+            )
             for i in range(depth)])
         use_fc_norm = self.global_pool == 'avg'
         self.norm = norm_layer(embed_dim) if not use_fc_norm else nn.Identity()

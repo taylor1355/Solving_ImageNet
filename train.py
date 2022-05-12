@@ -19,6 +19,7 @@ import time
 import yaml
 import os
 import re
+import glob
 import logging
 import math
 from collections import OrderedDict
@@ -42,7 +43,7 @@ from timm.utils import ApexScaler, NativeScaler
 from models import create_model, safe_model_name, resume_checkpoint, load_checkpoint, \
     convert_splitbn_model, model_parameters
 from utils.checkpoint_saver import CheckpointSaverUSI
-from utils.utils import get_grad_norm
+from utils.utils import get_grad_norm, find_param_containing_substring
 from kd.kd_utils import build_kd_model
 
 try:
@@ -308,10 +309,14 @@ parser.add_argument('--torchscript', dest='torchscript', action='store_true',
 parser.add_argument('--log-wandb', action='store_true', default=False,
                     help='log training and validation metrics to wandb')
 
-# Continual Learning Parameters
-parser.add_argument('--attention_type', default='normal')
+# Bidirectional Attention Parameters
+parser.add_argument('--is_bidirectional', action='store_true', default=False)
 parser.add_argument('--injection_blocks', nargs='+', type=int, default=-1)
-parser.add_argument('--non_transposed_softmax', action='store_true', default=False)
+parser.add_argument('--initial_lambda', type=float, default=0.)
+parser.add_argument('--freeze_lambda', action='store_true', default=False)
+parser.add_argument('--layer_norm', action='store_true', default=False)
+
+# Continual Learning Parameters
 parser.add_argument('--continue_learning', action='store_true', default=False)
 parser.add_argument('--freeze_baseline_parameters', action='store_true', default=False)
 parser.add_argument('--train_parameters', default='block')
@@ -374,9 +379,6 @@ def main(args, args_text):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     np.random.seed(seed)
-    random.seed(seed)
-
-    _logger.info('Print strict: {}'.format(args.not_strict))
 
     model_KD = None
     if args.kd_model_name is not None:
@@ -395,26 +397,23 @@ def main(args, args_text):
         bn_eps=args.bn_eps,
         scriptable=args.torchscript,
         checkpoint_path=args.initial_checkpoint,
-        attention_type=args.attention_type,
-        injection_blocks=args.injection_blocks,
         args=args,
         strict=not args.not_strict)
 
-    #print(model)
-    if args.continue_learning and args.freeze_baseline_parameters:
-        for param in model.parameters(): param.requires_grad = False
-        trainable_parameters = []
-        for injection_block in args.injection_blocks:
-            block = model.blocks[injection_block]
-            if 'reverse' in args.attention_type:
-                trainable_parameters += block.attn.reverse_parameters + block.attn.layer_parameters
-            if args.attention_type == 'shared_forward_and_reverse':
-                trainable_parameters += block.attn.forward_parameters
-            if args.train_parameters == 'block':
-                trainable_parameters += block.block_parameters
-        
-        for param in trainable_parameters:
-            set_requires_grad(param, True)
+    #if args.continue_learning and args.freeze_baseline_parameters:
+    #    for param in model.parameters(): param.requires_grad = False
+    #    trainable_parameters = []
+    #    for injection_block in args.injection_blocks:
+    #        block = model.blocks[injection_block]
+    #        if 'reverse' in args.attention_type:
+    #            trainable_parameters += block.attn.reverse_parameters + block.attn.layer_parameters
+    #        if args.attention_type == 'shared_forward_and_reverse':
+    #            trainable_parameters += block.attn.forward_parameters
+    #        if args.train_parameters == 'block':
+    #            trainable_parameters += block.block_parameters
+    #    
+    #    for param in trainable_parameters:
+    #        set_requires_grad(param, True)
         
     _logger.info('Trainable Paramaters: {}'.format(
         [name for name, param in model.named_parameters() if param.requires_grad])
@@ -653,7 +652,8 @@ def main(args, args_text):
             f.write(args_text)
 
     try:
-        epoch_losses = []
+        train_losses = []
+        eval_losses = []
         for epoch in range(start_epoch, num_epochs):
             if args.distributed and hasattr(loader_train.sampler, 'set_epoch'):
                 loader_train.sampler.set_epoch(epoch)
@@ -664,25 +664,6 @@ def main(args, args_text):
                 amp_autocast=amp_autocast, loss_scaler=loss_scaler, model_ema=model_ema, mixup_fn=mixup_fn,
                 model_KD=model_KD)
 
-            epoch_losses.append(train_metrics['loss'])
-            loss_spiked = len(epoch_losses) >= 3 and epoch_losses[-1] >= 1.4 * epoch_losses[-3]
-            #loss_spiked=epoch >= 2 #TODO: remove
-            if math.isnan(epoch_losses[-1]) or loss_spiked:
-                if saver is not None and len(epoch_losses) >= 3:
-                    most_recent_epoch = -1
-                    most_recent_path = None
-                    for checkpoint in saver.checkpoint_files:
-                        path, _ = checkpoint
-                        checkpoint_epoch = int(re.findall(r'\d+', path)[-1])
-                        if checkpoint_epoch <= epoch - 2 and checkpoint_epoch > most_recent_epoch:
-                            most_recent_epoch = checkpoint_epoch
-                            most_recent_path = path
-                    args.resume = most_recent_path
-                    print(f"Restarting from checkpoint '{most_recent_epoch}'")
-                    
-                print(f"Restarting training")
-                return False
-
             if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
                 if args.local_rank == 0:
                     _logger.info("Distributing BatchNorm running means and vars")
@@ -690,6 +671,32 @@ def main(args, args_text):
 
             eval_metrics = validate(model, loader_eval, validate_loss_fn, args, amp_autocast=amp_autocast)
             eval_metrics_unite=eval_metrics
+
+            train_losses.append(train_metrics['loss'])
+            eval_losses.append(eval_metrics['loss'])
+            loss_spiked = len(train_losses) >= 3 and (train_losses[-1] >= 1.4 * train_losses[-3] or eval_losses[-1] >= 1.4 * eval_losses[-3])
+            if math.isnan(train_losses[-1]) or loss_spiked:
+                if saver is not None:
+                    most_recent_epoch = -1
+                    most_recent_path = None
+                    
+                    checkpoint_paths = glob.glob(os.path.join(saver.checkpoint_dir, '**/*.pth.tar'), recursive=True)
+                    for path in checkpoint_paths:
+                        checkpoint_epoch = int(re.findall(r'\d+', path)[-1])
+                        non_numeric = path.endswith('best.pth.tar') or path.endswith('last.pth.tar')
+                        if not non_numeric and checkpoint_epoch <= epoch - 2 and checkpoint_epoch > most_recent_epoch:
+                            most_recent_epoch = checkpoint_epoch
+                            most_recent_path = path
+
+                    if most_recent_epoch > -1:
+                        args.resume = most_recent_path
+                        print(f"Restarting from checkpoint '{most_recent_epoch}'")
+                    else:
+                        print("Could not find a checkpoint to resume from, restarting training")
+                    
+                torch.distributed.barrier()
+                return False
+
 
             ema_eval_metrics = None
             if model_ema is not None and not args.model_ema_force_cpu:
@@ -745,6 +752,7 @@ def train_one_epoch(
     data_time_m = AverageMeter()
     losses_m = AverageMeter()
     grad_norms_m = AverageMeter()
+    lambdas_m = AverageMeter()
 
     model.train()
 
@@ -800,8 +808,11 @@ def train_one_epoch(
                     value=args.clip_grad, mode=args.clip_mode)
             optimizer.step()
 
-        grad_norm = get_grad_norm(model.parameters()) # TODO: maybe replace with model_parameters(model, exclude_head='agc' in args.clip_mode)
+        grad_norm = get_grad_norm(model.parameters())
         grad_norms_m.update(grad_norm)
+
+        lambda_val = find_param_containing_substring(model, "selection_lambda")
+        lambdas_m.update(lambda_val)
 
         if model_ema is not None:
             model_ema.update(model)
@@ -822,6 +833,7 @@ def train_one_epoch(
                     'Train: {} [{:>4d}/{} ({:>3.0f}%)]  '
                     'Loss: {loss.val:#.4g} ({loss.avg:#.3g})  '
                     'Grad Norm: {grad_norm.val:#.4g} ({grad_norm.avg:#.3g})  '
+                    'Lambda: {lambdas_m.val:#.4g} ({lambdas_m.avg:#.3g})  '
                     'Time: {batch_time.val:.3f}s, {rate:>7.2f}/s  '
                     '({batch_time.avg:.3f}s, {rate_avg:>7.2f}/s)  '
                     'LR: {lr:.3e}  '
@@ -831,6 +843,7 @@ def train_one_epoch(
                         100. * batch_idx / last_idx,
                         loss=losses_m,
                         grad_norm=grad_norms_m,
+                        lambdas_m=lambdas_m,
                         batch_time=batch_time_m,
                         rate=input.size(0) * args.world_size / batch_time_m.val,
                         rate_avg=input.size(0) * args.world_size / batch_time_m.avg,
@@ -857,7 +870,11 @@ def train_one_epoch(
     if hasattr(optimizer, 'sync_lookahead'):
         optimizer.sync_lookahead()
 
-    return OrderedDict([('loss', losses_m.avg)])
+    return OrderedDict([
+        ('loss', losses_m.avg),
+        ('grad_norm', grad_norms_m.avg),
+        ('lambda', lambdas_m.avg),
+    ])
 
 
 def validate(model, loader, loss_fn, args, amp_autocast=suppress, log_suffix=''):
@@ -957,3 +974,5 @@ if __name__ == '__main__':
     done_training = False
     while not done_training:
         done_training = main(args, args_text)
+        if not done_training:
+            print(f'Restarting {args.rank}')
