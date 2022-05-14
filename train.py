@@ -811,8 +811,9 @@ def train_one_epoch(
         grad_norm = get_grad_norm(model.parameters())
         grad_norms_m.update(grad_norm)
 
-        lambda_val = find_param_containing_substring(model, "selection_lambda")
-        lambdas_m.update(lambda_val)
+        if args.is_bidirectional:
+            lambda_val = find_param_containing_substring(model, "selection_lambda")
+            lambdas_m.update(lambda_val)
 
         if model_ema is not None:
             model_ema.update(model)

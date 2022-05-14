@@ -58,19 +58,23 @@ class BidirectionalAttention(nn.Module):
             self.selection_lambda = nn.Parameter(torch.tensor(self.args.initial_lambda))
             self.selection_lambda.requires_grad = not self.args.freeze_lambda
 
-            if self.args.layer_norm:
-                self.sa_norm = nn.LayerNorm(normalized_shape=self.dim, elementwise_affine=False)
-                self.isa_norm = nn.LayerNorm(normalized_shape=self.dim, elementwise_affine=False)
-
             self.reverse_parameters += [
                 self.selection_lambda,
                 self.G,
                 self.bias_generator,
                 self.local_proj,
-                self.global_proj,
-                self.sa_norm,
-                self.isa_norm
+                self.global_proj
             ]
+
+            if self.args.layer_norm:
+                self.sa_norm = nn.LayerNorm(normalized_shape=self.dim, elementwise_affine=False)
+                self.isa_norm = nn.LayerNorm(normalized_shape=self.dim, elementwise_affine=False)
+
+                self.reverse_parameters += [
+                    self.sa_norm,
+                    self.isa_norm
+                ]
+
 
     def instantiate_output_weights(self):
         self.attn_drop = nn.Dropout(self.attn_drop)

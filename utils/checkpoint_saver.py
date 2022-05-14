@@ -133,7 +133,7 @@ class CheckpointSaverUSI:  # don't save optimizer state dict, since it forces sp
                 old_checkpoint_dir = os.path.join(self.checkpoint_dir, 'old')
                 Path(old_checkpoint_dir).mkdir(parents=True, exist_ok=True)
 
-                checkpoint_name = os.pathbasename(d[0])
+                checkpoint_name = os.path.basename(d[0])
                 shutil.move(d[0], os.path.join(old_checkpoint_dir, checkpoint_name))
                 
             except Exception as e:
