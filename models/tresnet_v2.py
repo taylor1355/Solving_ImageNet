@@ -137,7 +137,7 @@ class Bottleneck(nn.Module):
 
 class TResNet(nn.Module):
     def __init__(self, layers, in_chans=3, num_classes=1000, width_factor=1.0, global_pool='fast', drop_rate=0.,
-                 drop_path_rate=0.):
+                 drop_path_rate=0., args=None):
         self.num_classes = num_classes
         self.drop_rate = drop_rate
         super(TResNet, self).__init__()

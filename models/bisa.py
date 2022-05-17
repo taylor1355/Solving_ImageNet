@@ -67,13 +67,15 @@ class BidirectionalAttention(nn.Module):
             ]
 
             if self.args.layer_norm:
-                self.sa_norm = nn.LayerNorm(normalized_shape=self.dim, elementwise_affine=False)
-                self.isa_norm = nn.LayerNorm(normalized_shape=self.dim, elementwise_affine=False)
+                self.sa_norm = nn.LayerNorm(normalized_shape=self.dim, elementwise_affine=self.args.ln_affine_transform)
+                self.isa_norm = nn.LayerNorm(normalized_shape=self.dim, elementwise_affine=self.args.ln_affine_transform)
 
                 self.reverse_parameters += [
                     self.sa_norm,
                     self.isa_norm
                 ]
+            elif self.args.ln_affine_transform:
+                raise ValueError("affine_transform=True requires layer_norm=True")
 
 
     def instantiate_output_weights(self):
@@ -120,8 +122,11 @@ class BidirectionalAttention(nn.Module):
 
             if self.args.layer_norm:
                 tensor_shape = sa_outputs.shape
-                sa_outputs = self.sa_norm(sa_outputs.flatten(0, 1)).reshape(*tensor_shape)
-                isa_outputs = self.isa_norm(isa_outputs.flatten(0, 1)).reshape(*tensor_shape)
+                if not self.args.no_ln_flatten:
+                    sa_outputs = sa_outputs.flatten(0, 1)
+                    isa_outputs = isa_outputs.flatten(0, 1)
+                sa_outputs = self.sa_norm(sa_outputs).reshape(*tensor_shape)
+                isa_outputs = self.isa_norm(isa_outputs).reshape(*tensor_shape)
 
             forget_weight = torch.sigmoid(self.selection_lambda)
             output = sa_outputs * forget_weight + isa_outputs * (1. - forget_weight)

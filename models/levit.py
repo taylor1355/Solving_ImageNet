@@ -54,6 +54,7 @@ default_cfgs = dict(
     levit_128s=_cfg(
         url='https://dl.fbaipublicfiles.com/LeViT/LeViT-128S-96703c44.pth'
     ),
+    levit_128s_modified=_cfg(),
     levit_128=_cfg(
         url='https://dl.fbaipublicfiles.com/LeViT/LeViT-128-b88c2750.pth'
     ),
@@ -71,6 +72,8 @@ default_cfgs = dict(
 model_cfgs = dict(
     levit_128s=dict(
         embed_dim=(128, 256, 384), key_dim=16, num_heads=(4, 6, 8), depth=(2, 3, 4)),
+    levit_128s_modified=dict(
+        embed_dim=(128, 258, 384), key_dim=16, num_heads=(4, 6, 8), depth=(2, 3, 4)),
     levit_128=dict(
         embed_dim=(128, 256, 384), key_dim=16, num_heads=(4, 8, 12), depth=(4, 4, 4)),
     levit_192=dict(
@@ -89,6 +92,10 @@ def levit_128s(pretrained=False, use_conv=False, **kwargs):
     return create_levit(
         'levit_128s', pretrained=pretrained, use_conv=use_conv, **kwargs)
 
+@register_model
+def levit_128s_modified(pretrained=False, use_conv=False, **kwargs):
+    return create_levit(
+        'levit_128s_modified', pretrained=pretrained, use_conv=use_conv, **kwargs)
 
 @register_model
 def levit_128(pretrained=False, use_conv=False, **kwargs):
@@ -512,7 +519,11 @@ class Levit(nn.Module):
         for i, (ed, kd, dpth, nh, ar, mr, do) in enumerate(
                 zip(embed_dim, key_dim, depth, num_heads, attn_ratio, mlp_ratio, down_ops)):
             for j in range(dpth):
-                is_bidirectional = j == 0 and args.injection_blocks != -1 and i in args.injection_blocks and args.is_bidirectional
+                correct_layer = j == 0 or args.whole_stage
+                correct_stage = args.injection_blocks != -1 and i in args.injection_blocks
+                is_bidirectional = correct_layer and correct_stage and args.is_bidirectional
+                if args.rank == 0:
+                    print(f'i{i}, j{j} isa={is_bidirectional}')
                 if is_bidirectional:
                     self.blocks.append(
                         Residual(

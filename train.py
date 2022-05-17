@@ -312,9 +312,12 @@ parser.add_argument('--log-wandb', action='store_true', default=False,
 # Bidirectional Attention Parameters
 parser.add_argument('--is_bidirectional', action='store_true', default=False)
 parser.add_argument('--injection_blocks', nargs='+', type=int, default=-1)
+parser.add_argument('--whole_stage', action='store_true', default=False)
 parser.add_argument('--initial_lambda', type=float, default=0.)
 parser.add_argument('--freeze_lambda', action='store_true', default=False)
 parser.add_argument('--layer_norm', action='store_true', default=False)
+parser.add_argument('--ln_affine_transform', action='store_true', default=False)
+parser.add_argument('--no_ln_flatten', action='store_true', default=False)
 
 # Continual Learning Parameters
 parser.add_argument('--continue_learning', action='store_true', default=False)
