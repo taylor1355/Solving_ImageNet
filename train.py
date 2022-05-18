@@ -679,26 +679,25 @@ def main(args, args_text):
 
             train_losses.append(train_metrics['loss'])
             eval_losses.append(eval_metrics['loss'])
-            loss_spiked = len(train_losses) >= 3 and (train_losses[-1] >= 1.4 * train_losses[-3] or eval_losses[-1] >= 1.4 * eval_losses[-3])
-            if math.isnan(train_losses[-1]) or loss_spiked:
-                if saver is not None:
-                    most_recent_epoch = -1
-                    most_recent_path = None
-                    
-                    checkpoint_paths = glob.glob(os.path.join(saver.checkpoint_dir, '**/*.pth.tar'), recursive=True)
-                    for path in checkpoint_paths:
-                        checkpoint_epoch = int(re.findall(r'\d+', path)[-1])
-                        non_numeric = path.endswith('best.pth.tar') or path.endswith('last.pth.tar')
-                        if not non_numeric and checkpoint_epoch <= epoch - 2 and checkpoint_epoch > most_recent_epoch:
-                            most_recent_epoch = checkpoint_epoch
-                            most_recent_path = path
+            loss_spiked = len(train_losses) >= 2 and (train_losses[-1] >= 1.4 * train_losses[-2] or eval_losses[-1] >= 1.4 * eval_losses[-2])
+            if math.isnan(train_losses[-1]) or math.isnan(eval_losses[-1]) or loss_spiked:
+                most_recent_epoch = -1
+                most_recent_path = None
+                
+                checkpoint_paths = glob.glob(os.path.join(output_dir, '**/*.pth.tar'), recursive=True)
+                for path in checkpoint_paths:
+                    checkpoint_epoch = int(re.findall(r'\d+', path)[-1])
+                    non_numeric = path.endswith('best.pth.tar') or path.endswith('last.pth.tar')
+                    if not non_numeric and checkpoint_epoch < epoch and checkpoint_epoch > most_recent_epoch:
+                        most_recent_epoch = checkpoint_epoch
+                        most_recent_path = path
 
-                    if most_recent_epoch > -1:
-                        args.resume = most_recent_path
-                        print(f"Restarting from checkpoint '{most_recent_epoch}'")
-                    else:
-                        print("Could not find a checkpoint to resume from, restarting training")
-                    
+                if most_recent_epoch > -1:
+                    args.resume = most_recent_path
+                    print(f"Restarting from checkpoint '{most_recent_epoch}'")
+                else:
+                    print("Could not find a checkpoint to resume from, restarting training")
+                
                 torch.distributed.barrier()
                 return False
 
