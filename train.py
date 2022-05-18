@@ -318,6 +318,8 @@ parser.add_argument('--freeze_lambda', action='store_true', default=False)
 parser.add_argument('--layer_norm', action='store_true', default=False)
 parser.add_argument('--ln_affine_transform', action='store_true', default=False)
 parser.add_argument('--no_ln_flatten', action='store_true', default=False)
+parser.add_argument('--ln_all_dim', action='store_true', default=False)
+parser.add_argument('--group_norm', action='store_true', default=False)
 
 # Continual Learning Parameters
 parser.add_argument('--continue_learning', action='store_true', default=False)

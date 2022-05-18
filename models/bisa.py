@@ -125,8 +125,19 @@ class BidirectionalAttention(nn.Module):
                 if not self.args.no_ln_flatten:
                     sa_outputs = sa_outputs.flatten(0, 1)
                     isa_outputs = isa_outputs.flatten(0, 1)
-                sa_outputs = self.sa_norm(sa_outputs).reshape(*tensor_shape)
-                isa_outputs = self.isa_norm(isa_outputs).reshape(*tensor_shape)
+
+                if self.args.ln_all_dim:
+                    sa_outputs = F.layer_norm(sa_outputs, (B, N, C))
+                    isa_outputs = F.layer_norm(isa_outputs, (B, N, C))
+                elif self.args.group_norm:
+                    sa_outputs = sa_outputs.reshape(B, N, self.num_heads, C // self.num_heads)
+                    sa_outputs = F.layer_norm(sa_outputs, [C // self.num_heads]).reshape(*tensor_shape)
+
+                    isa_outputs = isa_outputs.reshape(B, N, self.num_heads, C // self.num_heads)
+                    isa_outputs = F.layer_norm(isa_outputs, [C // self.num_heads]).reshape(*tensor_shape)
+                else:
+                    sa_outputs = self.sa_norm(sa_outputs).reshape(*tensor_shape)
+                    isa_outputs = self.isa_norm(isa_outputs).reshape(*tensor_shape)
 
             forget_weight = torch.sigmoid(self.selection_lambda)
             output = sa_outputs * forget_weight + isa_outputs * (1. - forget_weight)
