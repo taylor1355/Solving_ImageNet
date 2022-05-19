@@ -111,13 +111,16 @@ class BidirectionalAttention(nn.Module):
         attn = (q @ k.transpose(-2, -1))
 
         reverse_attn = F.softmax(attn, dim=-2)
-        attn = self.softmax(attn)
 
-        attn = self.attn_drop(attn)
+        if not self.args.no_sa:
+            attn = self.softmax(attn)
+            attn = self.attn_drop(attn)
+            sa_outputs = (attn @ v).transpose(1, 2).reshape(B, N, C)
         reverse_attn = self.attn_drop(reverse_attn)
-        sa_outputs = (attn @ v).transpose(1, 2).reshape(B, N, C)
 
-        if self.args.is_bidirectional:
+        if self.args.no_sa:
+            output = self.apply_inverse_attention(x, reverse_attn)
+        elif self.args.is_bidirectional:
             isa_outputs = self.apply_inverse_attention(x, reverse_attn)
 
             if self.args.layer_norm:
@@ -127,8 +130,8 @@ class BidirectionalAttention(nn.Module):
                     isa_outputs = isa_outputs.flatten(0, 1)
 
                 if self.args.ln_all_dim:
-                    sa_outputs = F.layer_norm(sa_outputs, (B, N, C))
-                    isa_outputs = F.layer_norm(isa_outputs, (B, N, C))
+                    sa_outputs = F.layer_norm(sa_outputs, (N, C))
+                    isa_outputs = F.layer_norm(isa_outputs, (N, C))
                 elif self.args.group_norm:
                     sa_outputs = sa_outputs.reshape(B, N, self.num_heads, C // self.num_heads)
                     sa_outputs = F.layer_norm(sa_outputs, [C // self.num_heads]).reshape(*tensor_shape)
