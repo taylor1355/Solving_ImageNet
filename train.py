@@ -685,6 +685,7 @@ def main(args, args_text):
                 most_recent_epoch = -1
                 most_recent_path = None
                 
+                output_dir = get_outdir(args.output if args.output else './output/train', args.experiment)
                 checkpoint_paths = glob.glob(os.path.join(output_dir, '**/*.pth.tar'), recursive=True)
                 for path in checkpoint_paths:
                     checkpoint_epoch = int(re.findall(r'\d+', path)[-1])
